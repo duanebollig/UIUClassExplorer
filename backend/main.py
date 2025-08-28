@@ -1,54 +1,64 @@
-import os
-import requests
-from dotenv import load_dotenv
-from flask import Flask,jsonify
-from flask_cors import CORS
+import os, asyncio, requests
+from contextlib import asynccontextmanager
 from urllib.parse import urljoin
+from dotenv import load_dotenv
 
-import asyncio
-from playwright.async_api import async_playwright
-from playwright.sync_api import sync_playwright
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from bs4 import BeautifulSoup
-
-userYearSelected = input("What Year? ")
+from playwright.async_api import async_playwright, BrowserContext, Page
 
 load_dotenv()
-BASE_URL = f"{os.getenv('COURSEEXPLORERURL')}{userYearSelected}"
+BASE_URL = os.getenv("COURSEEXPLORERURL")
+MAX_CONCURRENCY = 10
 
-# app = Flask(__name__)
-# CORS(app)
+async def scrapePageLinks(context: BrowserContext, URL:str, query: str, param: str | None,  select: bool = False):
+    page = await context.new_page()
+    await page.goto(URL, wait_until="domcontentloaded")
+    content = await page.content()
 
-def obtainSemester():
-    baseHTML = requests.get(BASE_URL)
-    soup = BeautifulSoup(baseHTML.text,"html.parser")
-    semestersOffered = {}
-    print()
-    for i,entry in enumerate(soup.select("td a[href]")):
-        print(f"{i}) {entry.get_text().strip()}")
-        link = entry.get("href")
-        semestersOffered.update({i:link})
-    semesterSelected = int(input("Enter Semester: "))
-    print()
+    soup = BeautifulSoup(content,"html.parser")
+    availableLinks = []
+    if param:
+        availableLinks = [e.get(param) for e in soup.select(query)]
+    else:
+        availableLinks = [e.get_text().strip() for e in soup.select(query)]
+    
+    await page.close()
 
-    return urljoin(BASE_URL,semestersOffered[semesterSelected])
+    if select:
+        for i, e in enumerate(availableLinks):
+            print(f"{i}) {e}")
+        selectedLink = int(input("Enter Option: "))
+        return urljoin(URL,availableLinks[selectedLink])
+    else:
+        return [urljoin(URL,link) for link in availableLinks]
 
-def obtainSubjectLinkList():
-    with sync_playwright() as syncplwr:
-        browser = syncplwr.webkit.launch(headless=True)
-        page = browser.new_page()
-        semesterURL = obtainSemester()
-        page.goto(semesterURL)
+async def controlledScrape(context: BrowserContext, URL: str, sem) -> str:
+    async with sem:
+        result = await scrapePageLinks(context, URL, "td a[href]","href")
+        return result
 
-        subjectHTML = page.content()
-        soup = BeautifulSoup(subjectHTML,"html.parser")
-        return [urljoin(BASE_URL,entry.get("href")) for entry in soup.select("td a[href]")]
+async def main():
+    async with async_playwright() as asp:
+        browser = await asp.chromium.launch(headless=True)
+        context = await browser.new_context()
+        
+        YEAR_URL = await scrapePageLinks(context,BASE_URL,"td a[href]","href",True)
+        SEMESTER_URL = await scrapePageLinks(context,YEAR_URL,"td a[href]","href",True)
+        SUBJECTLIST_URL = await scrapePageLinks(context,SEMESTER_URL,"td a[href]","href")
+
+        sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        tasks = [controlledScrape(context, url, sem) for url in SUBJECTLIST_URL]
+        results = await asyncio.gather(*tasks)
+
+        # with open("courses.txt","w",encoding="utf-8") as f:
+        #     for subject in results:
+        #         for link in subject:
+        #             f.write(f"{link}\n")
+
+        await browser.close()
 
 
-def scrapeCourseURLList():
-    subjectLinkList = obtainSubjectLinkList()
-    for i in subjectLinkList:
-        print(i)
-    # print(subjectLinkList)
-
-if (__name__ == "__main__"):
-    scrapeCourseURLList()
+asyncio.run(main())
