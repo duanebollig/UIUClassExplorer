@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 
 load_dotenv()
 BASE_URL = os.getenv("COURSEEXPLORERURL")
-MAX_CONCURRENCY = 10
+MAX_CONCURRENCY = os.getenv("MAX_CONCURRENCY")
 
 async def scrapePageLinks(context: BrowserContext, URL:str, query: str, param: str | None,  select: bool = False):
     page = await context.new_page()
