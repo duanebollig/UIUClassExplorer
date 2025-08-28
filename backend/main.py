@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 
 load_dotenv()
 BASE_URL = os.getenv("COURSEEXPLORERURL")
-MAX_CONCURRENCY = os.getenv("MAX_CONCURRENCY")
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY"))
 
 async def scrapePageLinks(context: BrowserContext, URL:str, query: str, param: str | None,  select: bool = False):
     page = await context.new_page()
@@ -52,11 +52,6 @@ async def main():
         sem = asyncio.Semaphore(MAX_CONCURRENCY)
         tasks = [controlledScrape(context, url, sem) for url in SUBJECTLIST_URL]
         results = await asyncio.gather(*tasks)
-
-        # with open("courses.txt","w",encoding="utf-8") as f:
-        #     for subject in results:
-        #         for link in subject:
-        #             f.write(f"{link}\n")
 
         await browser.close()
 
