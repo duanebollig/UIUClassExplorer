@@ -1,88 +1,94 @@
-import os, asyncio, re
-from contextlib import asynccontextmanager
+import os, asyncio, re, lxml, aiohttp
+from typing import Literal
 from urllib.parse import urljoin
 from dotenv import load_dotenv
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
+from playwright.async_api import async_playwright, BrowserContext
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, BrowserContext, Page
+
 
 load_dotenv()
 BASE_URL = os.getenv("COURSEEXPLORERURL")
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY"))
+CONCURRENCY_LIMIT = int(os.getenv("MAX_CONCURRENCY"))
+YEAR = os.getenv("YEAR")
+YEAR_URL = BASE_URL+YEAR
 
-async def scrapePageCustom(
-    context: BrowserContext,
-    URL:str,
-    query: str,
-    param: str = None,
-    select: bool = False
-):
-    page = await context.new_page()
-    await page.goto(URL, wait_until="networkidle")
-    content = await page.content()
-    soup = BeautifulSoup(content,"lxml")
+paramsForScrape = Literal["text","data","only_link"]
+async def scrapeHTML(
+        session: aiohttp.ClientSession,
+        url: str,
+        param: paramsForScrape = "nodata"
+    ):
+    async with session.get(url) as response:
+        html = await response.text()
+        soup = BeautifulSoup(html,"lxml")
 
-    if query == "preReq":
-        rawTitle = await page.title()
-        processedTitle = rawTitle.split("|")[0].strip()
+        match param:
+            case "text":
+                # rawP = soup.select("p")
+                # WORK IN PROGRESS
+                prereqLinks = soup.select("p a[href]")
+                processedPrereqs = [link.get("href") for link in prereqLinks if "schedule" in link.get("href")]
 
-        prereqText:str = None
-        for p in soup.find_all("p"):
-            rawText = p.get_text(" ", strip=True)
-            if "Prerequisite" in rawText:
-                prereqText = rawText[rawText.find(':')+1:].strip()
+                return processedPrereqs
 
-        return processedTitle,prereqText or "N/A"
+            case "data":
+                courseData = {}
+                rawRows = soup.select("table > tbody > tr")
 
-    availableLinks = []
-    if param:
-        availableLinks = [e.get(param) for e in soup.select(query)]
-    else:
-        availableLinks = [e.get_text().strip() for e in soup.select(query)]
-    
-    if select:
-        for i, e in enumerate(availableLinks):
-            print(f"{i}) {e}")
-        selectedLink = int(input("Enter Option: "))
-        return urljoin(URL,availableLinks[selectedLink])
-    else:
-        return [urljoin(URL,link) for link in availableLinks]
+                for row in rawRows:
+                    rawData = row.find_all("td")
+                    courseCode = rawData[0].get_text(strip=True)
+                    courseName = rawData[1].get_text(strip=True) 
+                    rawLink = row.select_one("a[href]").get("href")
+                    courseLink = urljoin(url,rawLink)
 
-async def controlledScrape(context: BrowserContext, URL: str, sem) -> str:
+                    courseData[courseCode] = {
+                        "name": courseName,
+                        "link": courseLink
+                    }
+
+                return courseData
+            
+            case "only_link":
+                rawData = soup.select("table > tbody > tr > td")
+                courseLinks = [urljoin(url,row.select_one("a[href]").get("href")) for row in rawData]
+
+                return courseLinks
+
+async def controlledScrape(
+        session: aiohttp.ClientSession,
+        url: str,
+        sem: asyncio.Semaphore
+    ):
+
     async with sem:
-        courseList = await scrapePageCustom(context, URL, "td a[href]","href")
-        processedCourses: dict[str:str] = {}
-        for course in courseList:
-            title, prereq = await scrapePageCustom(context,course,"preReq")
-            processedCourses[title] = prereq
-
-        return processedCourses
+        courseList = await scrapeHTML(session,url,preReq=True)
+        for i in courseList:
+            print(i)
 
 async def main():
-    async with async_playwright() as asp:
-        browser = await asp.chromium.launch(headless=True)
-        context = await browser.new_context()
+    async with aiohttp.ClientSession() as session:
+        # GET SEMESTER URL
+        semestersOffered = await scrapeHTML(session, YEAR_URL, param="only_link")
+        print(semestersOffered)
+        option = await asyncio.to_thread(input,"Enter Semester: ")
+        option = int(option)
+
+        # GET SUBJECTS OFFERED BY SEMESTER
+        semesterLink = semestersOffered[option]
+        subjectList = await scrapeHTML(session, semesterLink, param="data")
+
+        # SKIM THROUGH SUBJECT LIST
+        courseDirectory = {}
+        for subject in subjectList:
+            coursesBySubject = await scrapeHTML(session, subjectList[subject]["link"],param="data")
+            courseDirectory.update(coursesBySubject)
         
-        YEAR_URL = await scrapePageCustom(context,BASE_URL,"td a[href]","href",True)
-        SEMESTER_URL = await scrapePageCustom(context,YEAR_URL,"td a[href]","href",True)
-        SUBJECTLIST_URL = await scrapePageCustom(context,SEMESTER_URL,"td a[href]","href")
+        with open("courses.txt","w",encoding="utf-8") as f:
+            for course in courseDirectory:
+                f.write(f"{courseDirectory[course]["name"]} ({course}). {courseDirectory[course]["link"]}\n")
 
-        sem = asyncio.Semaphore(MAX_CONCURRENCY)
-        tasks = [controlledScrape(context, url, sem) for url in SUBJECTLIST_URL]
-        results = await asyncio.gather(*tasks)
 
-        await context.close()
-        await browser.close()
-        return results
+        
 
-rawData = asyncio.run(main())
-processedData = {}
-for d in rawData:
-    processedData.update(d)
-
-with open("courses.txt","w",encoding="utf-8") as f:
-    for course in processedData:
-        f.write(f"{course}: {processedData[course]}\n")
+asyncio.run(main())
