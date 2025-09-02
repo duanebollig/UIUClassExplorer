@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, lxml, json
+import os, asyncio, aiohttp, lxml, json, ollama
 from typing import Literal
 from urllib.parse import urljoin
 from dotenv import load_dotenv
@@ -9,24 +9,32 @@ from openai import AsyncOpenAI
 
 load_dotenv()
 BASE_URL = os.getenv("COURSEEXPLORERURL")
+
+fileLock = asyncio.Lock()
 CONCURRENCY_LIMIT = int(os.getenv("MAX_CONCURRENCY"))
-API_KEY = os.getenv("OPENROUTER_APIKEY")
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+LLM_MODEL = os.getenv("LLM_MODEL")
+
 YEAR = os.getenv("YEAR")
 YEAR_URL = BASE_URL+YEAR
 
-llm = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=API_KEY
+SEM_LLM = asyncio.Semaphore(2)
+ollamaClient = ollama.AsyncClient(
+    host=OLLAMA_HOST
 )
 
 SYS_PROMPT = (
     "you are an extractor of prerequisites, credits, and general education fulfillments from university courses given a paragraph"
-    "return JSON only exactly with keys:"
+    "return JSON only exactly with keys. NO PROSE, just the JSON:"
     '{"credit":(int),"prereq":(array of strings),"gened":(array of strings)}'
     "Rules:\n"
     "credit: if a single integer credit hour is stated (e.g., '3 hours.')\n"
-    "prereq: return the course codes that follow the 'Prerequisite(s): ' string in uppercase. (e.g. 'ACES 220', 'CS 225')\n"
-    "gend-ed: return the string of what general eduaction are fulfilled (e.g. 'Cultural Studies - US Minority.')"
+    "prereq: return the course codes that follow the 'Prerequisite(s): ' string in uppercase. (e.g. 'ACES 220', 'CS 225')."
+    "If there is not a specific class, return the sentence following the prerequisite string."
+    "If there are no prerequisites, return a string 'N/A'.\n"
+    "gen-ed: return the string of what general eduaction are fulfilled (e.g. 'Cultural Studies - US Minority.')."
+    "If there are no gen-ed fulfillments, return a string 'N/A'.\n"
 )
 
 async def getData(
@@ -48,17 +56,24 @@ async def getData(
 async def llmProcess(
         paragraph: str
 ):
-    response = await llm.chat.completions.create(
-        model = "gpt-3.5-turbo",
-        messages = [
-            {"role":"system","content":SYS_PROMPT},
-            {"role":"user","content":paragraph}
-        ],
-        temperature = 0,
-        max_tokens = 160
-    )
+    messages = [
+        {"role":"system","content":SYS_PROMPT},
+        {"role":"user","content":paragraph}
+    ]
 
-    rawJSON = response.choices[0].message.content
+    async with SEM_LLM:
+        response = await ollamaClient.chat(
+            model = LLM_MODEL,
+            messages = messages,
+            format = "json",
+            options = {
+                "temperature":0,
+                "num_ctx": 4096,
+                "keep_alive": "5m"
+            }
+        )
+    
+    rawJSON = response["message"]["content"]
     processedJSON = json.loads(rawJSON)
     return processedJSON
 
@@ -118,13 +133,20 @@ async def controlledScrape(
         url: str,
         sem: asyncio.Semaphore
     ):
-
     async with sem:
-        courseList = await scrapeHTML(session,url,preReq=True)
-        for i in courseList:
-            print(i)
+        data = await scrapeHTML(session,url,param="datatext")
+        async with fileLock:
+            with open("courses.txt","a",encoding="utf-8") as f:
+                for course in data:
+                    f.write(
+                        f"{data[course]["name"]} ({course}). {data[course]["link"]}\n"
+                        f"Credit: {data[course]["credit"]}. Prereq(s): {data[course]["prereq"]}. Gen-Ed: {data[course]["gened"]}.\n\n"
+                    )
+        
+        return data
 
 async def main():
+    sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
     async with aiohttp.ClientSession() as session:
         # GET SEMESTER URL
         semestersOffered = await scrapeHTML(session, YEAR_URL, param="only_link")
@@ -137,15 +159,14 @@ async def main():
         semesterLink = semestersOffered[option]
         subjectList = await scrapeHTML(session, semesterLink, param="data")
 
+        # RETURN COURSE INFO
+        tasks = [controlledScrape(session,subjectList[sub]["link"],sem) for sub in subjectList]
+        results = await asyncio.gather(*tasks)
+
         # SKIM THROUGH SUBJECT LIST
         courseDirectory = {}
-        for subject in subjectList:
-            coursesBySubject = await scrapeHTML(session, subjectList[subject]["link"],param="datatext")
-            courseDirectory.update(coursesBySubject)
+        for result in results:
+            courseDirectory.update(result)
 
-        # WRTIE SUBJETCS
-        with open("courses.txt","w",encoding="utf-8") as f:
-            for course in courseDirectory:
-                f.write(f"{courseDirectory[course]["name"]} ({course}). {courseDirectory[course]["link"]}\n")
 
 asyncio.run(main())
