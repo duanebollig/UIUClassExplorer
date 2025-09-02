@@ -34,7 +34,7 @@ SYS_PROMPT = (
     "If there is not a specific class, return the sentence following the prerequisite string."
     "If there are no prerequisites, return a string 'N/A'.\n"
     "gen-ed: return the string of what general eduaction are fulfilled (e.g. 'Cultural Studies - US Minority.')."
-    "If there are no gen-ed fulfillments, return a string 'N/A'.\n"
+    "If there are is no explicit Gen-Education fulfillments, return a string 'N/A', do not predict if a course will be a gen-ed.\n"
 )
 
 async def getData(
