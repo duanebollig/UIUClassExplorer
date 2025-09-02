@@ -1,0 +1,1 @@
+Program only works if Ollama Mistral model is installed on your computer and running at the time of running the program.
