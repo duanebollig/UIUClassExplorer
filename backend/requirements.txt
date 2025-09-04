@@ -19,6 +19,7 @@ idna==3.10
 jiter==0.10.0
 lxml==6.0.1
 multidict==6.6.4
+ollama==0.5.3
 openai==1.102.0
 propcache==0.3.2
 pydantic==2.11.7

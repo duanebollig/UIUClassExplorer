@@ -4,8 +4,6 @@ from urllib.parse import urljoin
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from openai import AsyncOpenAI
-
 
 load_dotenv()
 BASE_URL = os.getenv("COURSEEXPLORERURL")
